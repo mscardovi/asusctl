@@ -11,11 +11,13 @@ pub fn handle_dialpad(cmd: &DialpadCommand) -> Result<(), Box<dyn std::error::Er
             let supported = proxy.supported().unwrap_or(true);
             let enabled = proxy.enabled()?;
             let brightness = proxy.brightness()?;
+            let mode = proxy.mode().unwrap_or_else(|_| "Auto".into());
             info!(
                 "DialPad Supported: {}",
                 if supported { "YES" } else { "NO" }
             );
             info!("DialPad Enabled: {}", if enabled { "YES" } else { "NO" });
+            info!("DialPad Mode: {mode}");
             info!("DialPad Brightness: {brightness}");
         }
         DialpadSubCommand::On(_) => {
@@ -29,6 +31,10 @@ pub fn handle_dialpad(cmd: &DialpadCommand) -> Result<(), Box<dyn std::error::Er
         DialpadSubCommand::Brightness(cmd) => {
             proxy.set_brightness(cmd.value)?;
             info!("DialPad brightness set to {}", cmd.value);
+        }
+        DialpadSubCommand::Mode(cmd) => {
+            proxy.set_mode(&cmd.mode)?;
+            info!("DialPad mode set to {}", cmd.mode);
         }
     }
 

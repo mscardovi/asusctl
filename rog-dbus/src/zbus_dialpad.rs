@@ -20,6 +20,12 @@ pub trait Dialpad {
     #[zbus(property)]
     fn set_brightness(&self, value: u8) -> zbus::Result<()>;
 
+    /// Mode property ("Hardware", "VirtualSoftware", "Auto")
+    #[zbus(property)]
+    fn mode(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn set_mode(&self, mode: &str) -> zbus::Result<()>;
+
     /// Supported property
     #[zbus(property)]
     fn supported(&self) -> zbus::Result<bool>;

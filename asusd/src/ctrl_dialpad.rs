@@ -152,6 +152,25 @@ impl CtrlDialpad {
     }
 
     #[zbus(property)]
+    async fn mode(&self) -> Result<String, FdoErr> {
+        Ok(self.dialpad.mode().to_string())
+    }
+
+    #[zbus(property)]
+    async fn set_mode(&self, mode_str: String) -> Result<(), zbus::Error> {
+        use rog_platform::dialpad::DialpadMode;
+        use std::str::FromStr;
+
+        let mode = DialpadMode::from_str(&mode_str)
+            .map_err(|e| FdoErr::Failed(format!("Invalid mode: {e}")))?;
+
+        let mut config = self.config.lock().await;
+        config.dialpad_mode = Some(mode.to_string());
+        config.write();
+        Ok(())
+    }
+
+    #[zbus(property)]
     async fn supported(&self) -> Result<bool, FdoErr> {
         Ok(true)
     }

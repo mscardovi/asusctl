@@ -382,6 +382,7 @@ pub enum DialpadSubCommand {
     On(DialpadOnCommand),
     Off(DialpadOffCommand),
     Brightness(DialpadSetBrightnessCommand),
+    Mode(DialpadSetModeCommand),
 }
 
 impl Default for DialpadSubCommand {
@@ -411,4 +412,15 @@ pub struct DialpadOffCommand {}
 pub struct DialpadSetBrightnessCommand {
     #[argh(positional, description = "brightness level (0-255)")]
     pub value: u8,
+}
+
+#[derive(FromArgs, Debug)]
+#[argh(
+    subcommand,
+    name = "mode",
+    description = "set DialPad mode (hardware/virtual/auto)"
+)]
+pub struct DialpadSetModeCommand {
+    #[argh(positional, description = "mode: auto, hardware, virtual")]
+    pub mode: String,
 }
