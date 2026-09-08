@@ -158,10 +158,7 @@ impl DeviceHandle {
         Ok(Self::Scsi(scsi))
     }
 
-    pub async fn maybe_laptop_aura(
-        device: Option<Arc<Mutex<HidRaw>>>,
-        prod_id: &str,
-    ) -> Result<Self, RogError> {
+    pub async fn maybe_laptop_aura(prod_id: &str) -> Result<Self, RogError> {
         debug!("Testing for laptop aura");
         let aura_type = AuraDeviceType::from(prod_id);
         if !matches!(
@@ -203,13 +200,19 @@ impl DeviceHandle {
                     Arc::new(Mutex::new(l))
                 })
                 .ok();
-            if global.is_some() || kbd.is_some() || lb.is_some() {
-                (global, kbd, lb)
-            } else {
-                debug!("Dynamic Lighting not detected; using legacy hidraw fallback");
-                (None, None, None)
-            }
+            (global, kbd, lb)
         };
+
+        if dynamic_global.is_none()
+            && dynamic_kbd.is_none()
+            && dynamic_lightbar.is_none()
+            && backlight.is_none()
+        {
+            debug!("Neither Dynamic Lighting nor sysfs backlight detected");
+            return Err(RogError::NotFound(
+                "No dynamic lighting or sysfs backlight found".to_string(),
+            ));
+        }
 
         // Load saved mode, colours, brightness, power from disk; apply on reload
         let mut config = AuraConfig::load_and_update_config(prod_id);
@@ -218,7 +221,6 @@ impl DeviceHandle {
             dynamic_global,
             dynamic_kbd,
             dynamic_lightbar,
-            hid: device,
             backlight,
             config: Arc::new(Mutex::new(config)),
         };

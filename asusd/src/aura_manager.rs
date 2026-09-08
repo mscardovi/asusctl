@@ -10,6 +10,7 @@ use std::sync::Arc;
 use dmi_id::DMIID;
 use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
+use rog_aura::AuraDeviceType;
 use rog_platform::error::PlatformError;
 use rog_platform::hid_raw::HidRaw;
 use tokio::sync::Mutex;
@@ -170,13 +171,45 @@ impl DeviceManager {
             // So let's see what we have and:
             // 1. Generate an interface path
             // 2. Create the device
+            let usb_id_str = usb_id.to_str().unwrap_or_default();
+            let aura_type = AuraDeviceType::from(usb_id_str);
+            if matches!(
+                aura_type,
+                AuraDeviceType::LaptopKeyboard2021
+                    | AuraDeviceType::LaptopKeyboardPre2021
+                    | AuraDeviceType::LaptopKeyboardTuf
+                    | AuraDeviceType::Ally
+            ) {
+                // AURA LAPTOP DEVICE - driven by Dynamic Lighting / sysfs, no hidraw needed
+                if let Ok(dev_type) = DeviceHandle::maybe_laptop_aura(usb_id_str).await
+                    && let DeviceHandle::Aura(aura) = dev_type.clone()
+                {
+                    let path = dbus_path_for_dev(&usb_device).unwrap_or(dbus_path_for_tuf());
+                    let ctrl = AuraZbus::new(aura);
+                    if ctrl
+                        .start_tasks(connection, path.clone())
+                        .await
+                        .map_err(|e| {
+                            error!("Failed to start Aura tasks: {e:?}, not adding this device")
+                        })
+                        .is_ok()
+                    {
+                        devices.push(AsusDevice {
+                            device: dev_type,
+                            dbus_path: path,
+                            hid_key: None,
+                        });
+                    }
+                }
+                return Ok(devices);
+            }
+
+            // For other devices that still require a shared hid handle (e.g. Slash):
             // Use the top-level endpoint, not the parent
             if let Ok((dev, hid_key)) = Self::get_or_create_hid_handle(&handles, &device).await {
                 debug!("Testing device {usb_id:?}");
                 // SLASH DEVICE
-                if let Ok(dev_type) =
-                    DeviceHandle::new_slash_hid(dev.clone(), usb_id.to_str().unwrap_or_default())
-                        .await
+                if let Ok(dev_type) = DeviceHandle::new_slash_hid(dev.clone(), usb_id_str).await
                     && let DeviceHandle::Slash(slash) = dev_type.clone()
                 {
                     let path = dbus_path_for_dev(&usb_device).unwrap_or(dbus_path_for_slash());
@@ -197,9 +230,7 @@ impl DeviceManager {
                     }
                 }
                 // ANIME MATRIX DEVICE
-                if let Ok(dev_type) =
-                    DeviceHandle::maybe_anime_hid(dev.clone(), usb_id.to_str().unwrap_or_default())
-                        .await
+                if let Ok(dev_type) = DeviceHandle::maybe_anime_hid(dev.clone(), usb_id_str).await
                     && let DeviceHandle::AniMe(anime) = dev_type.clone()
                 {
                     let path = dbus_path_for_dev(&usb_device).unwrap_or(dbus_path_for_anime());
@@ -209,29 +240,6 @@ impl DeviceManager {
                         .await
                         .map_err(|e| {
                             error!("Failed to start AniMe tasks: {e:?}, not adding this device")
-                        })
-                        .is_ok()
-                    {
-                        devices.push(AsusDevice {
-                            device: dev_type,
-                            dbus_path: path,
-                            hid_key: Some(hid_key.clone()),
-                        });
-                    }
-                }
-                // AURA LAPTOP DEVICE
-                if let Ok(dev_type) =
-                    DeviceHandle::maybe_laptop_aura(Some(dev), usb_id.to_str().unwrap_or_default())
-                        .await
-                    && let DeviceHandle::Aura(aura) = dev_type.clone()
-                {
-                    let path = dbus_path_for_dev(&usb_device).unwrap_or(dbus_path_for_tuf());
-                    let ctrl = AuraZbus::new(aura);
-                    if ctrl
-                        .start_tasks(connection, path.clone())
-                        .await
-                        .map_err(|e| {
-                            error!("Failed to start Aura tasks: {e:?}, not adding this device")
                         })
                         .is_ok()
                     {
@@ -515,7 +523,7 @@ impl DeviceManager {
             );
             if product_name.contains("TUF") || product_family.contains("TUF") {
                 info!("TUF laptop, try using sysfs backlight control");
-                if let Ok(dev_type) = DeviceHandle::maybe_laptop_aura(None, "tuf").await
+                if let Ok(dev_type) = DeviceHandle::maybe_laptop_aura("tuf").await
                     && let DeviceHandle::Aura(aura) = dev_type.clone()
                 {
                     let path = dbus_path_for_tuf();

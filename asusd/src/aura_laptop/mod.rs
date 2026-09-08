@@ -4,11 +4,9 @@ use config::AuraConfig;
 use config_traits::StdConfig;
 use log::info;
 use log::{debug, warn};
-use rog_aura::keyboard::{AuraLaptopUsbPackets, LedUsbPackets};
-use rog_aura::usb::{AURA_LAPTOP_LED_APPLY, AURA_LAPTOP_LED_SET};
-use rog_aura::{AURA_LAPTOP_LED_MSG_LEN, AuraDeviceType, AuraEffect, LedBrightness, PowerZones};
+use rog_aura::keyboard::AuraLaptopUsbPackets;
+use rog_aura::{AuraDeviceType, AuraEffect, LedBrightness};
 use rog_platform::DynamicLed;
-use rog_platform::hid_raw::HidRaw;
 use rog_platform::keyboard_led::KeyboardBacklight;
 use tokio::sync::{Mutex, MutexGuard};
 
@@ -22,7 +20,6 @@ pub struct Aura {
     pub dynamic_global: Option<Arc<Mutex<DynamicLed>>>,
     pub dynamic_kbd: Option<Arc<Mutex<DynamicLed>>>,
     pub dynamic_lightbar: Option<Arc<Mutex<DynamicLed>>>,
-    pub hid: Option<Arc<Mutex<HidRaw>>>,
     pub backlight: Option<Arc<Mutex<KeyboardBacklight>>>,
     pub config: Arc<Mutex<AuraConfig>>,
 }
@@ -190,39 +187,19 @@ impl Aura {
             ));
         }
 
-        // Fallback: TUF platform or legacy hidraw
-        if matches!(dev_type, AuraDeviceType::LaptopKeyboardTuf) {
-            if let Some(platform) = &self.backlight {
-                let buf = [
-                    1, mode.mode as u8, mode.colour1.r, mode.colour1.g, mode.colour1.b,
-                    mode.speed as u8,
-                ];
-                platform.lock().await.set_kbd_rgb_mode(&buf)?;
-            }
-        } else if let Some(hid_raw) = &self.hid {
-            // Some keyboard controllers (e.g. G533QS firmware) silently drop
-            // short HID writes and only honour packets matching the OUTPUT
-            // report size declared in the HID descriptor (64 bytes for the
-            // 0x5d report). Pad effect/SET/APPLY here so we keep working on
-            // newer Strix/Zephyrus models without regressing older laptops.
-            const PADDED_LEN: usize = 64;
-            let bytes: [u8; AURA_LAPTOP_LED_MSG_LEN] = mode.into();
-            let mut effect_padded = [0u8; PADDED_LEN];
-            effect_padded[..AURA_LAPTOP_LED_MSG_LEN].copy_from_slice(&bytes);
-            let mut set_padded = [0u8; PADDED_LEN];
-            set_padded[..AURA_LAPTOP_LED_MSG_LEN].copy_from_slice(&AURA_LAPTOP_LED_SET);
-            let mut apply_padded = [0u8; PADDED_LEN];
-            apply_padded[..AURA_LAPTOP_LED_MSG_LEN].copy_from_slice(&AURA_LAPTOP_LED_APPLY);
-            let hid_raw = hid_raw.lock().await;
-            hid_raw.write_bytes(&effect_padded)?;
-            hid_raw.write_bytes(&set_padded)?;
-            // Changes won't persist unless apply is set
-            hid_raw.write_bytes(&apply_padded)?;
-        } else {
-            return Err(RogError::NoAuraKeyboard);
+        // Fallback: TUF platform sysfs backlight
+        if matches!(dev_type, AuraDeviceType::LaptopKeyboardTuf)
+            && let Some(platform) = &self.backlight
+        {
+            let buf = [
+                1, mode.mode as u8, mode.colour1.r, mode.colour1.g, mode.colour1.b,
+                mode.speed as u8,
+            ];
+            platform.lock().await.set_kbd_rgb_mode(&buf)?;
+            return Ok(());
         }
 
-        Ok(())
+        Err(RogError::NoAuraKeyboard)
     }
 
     pub async fn set_brightness(&self, value: u8) -> Result<(), RogError> {
@@ -283,35 +260,12 @@ impl Aura {
             }
         }
 
-        if matches!(config.led_type, rog_aura::AuraDeviceType::LaptopKeyboardTuf) {
-            if let Some(backlight) = &self.backlight {
-                // TODO: tuf bool array
-                let buf = config.enabled.to_bytes(config.led_type);
-                backlight.lock().await.set_kbd_rgb_state(&buf)?;
-            }
-        } else if let Some(hid_raw) = &self.hid {
-            let hid_raw = hid_raw.lock().await;
-            if let Some(p) = config.enabled.states.first()
-                && p.zone == PowerZones::Ally
-            {
-                let msg = [
-                    0x5d,
-                    0xd1,
-                    0x09,
-                    0x01,
-                    p.new_to_byte() as u8,
-                    0x0,
-                    0x0,
-                ];
-                hid_raw.write_bytes(&msg)?;
-                return Ok(());
-            }
-
-            let bytes = config.enabled.to_bytes(config.led_type);
-            let msg = [
-                0x5d, 0xbd, 0x01, bytes[0], bytes[1], bytes[2], bytes[3],
-            ];
-            hid_raw.write_bytes(&msg)?;
+        if matches!(config.led_type, rog_aura::AuraDeviceType::LaptopKeyboardTuf)
+            && let Some(backlight) = &self.backlight
+        {
+            // TODO: tuf bool array
+            let buf = config.enabled.to_bytes(config.led_type);
+            backlight.lock().await.set_kbd_rgb_state(&buf)?;
         }
         Ok(())
     }
@@ -329,27 +283,7 @@ impl Aura {
             config.write();
         }
 
-        let pkt_type = effect[0][1];
-        const PER_KEY_TYPE: u8 = 0xbc;
-
-        if let Some(hid_raw) = &self.hid {
-            let hid_raw = hid_raw.lock().await;
-            if pkt_type != PER_KEY_TYPE {
-                config.per_key_mode_active = false;
-                hid_raw.write_bytes(&effect[0])?;
-                hid_raw.write_bytes(&AURA_LAPTOP_LED_SET)?;
-                // hid_raw.write_bytes(&LED_APPLY)?;
-            } else {
-                if !config.per_key_mode_active {
-                    let init = LedUsbPackets::get_init_msg();
-                    hid_raw.write_bytes(&init)?;
-                    config.per_key_mode_active = true;
-                }
-                for row in effect.iter() {
-                    hid_raw.write_bytes(row)?;
-                }
-            }
-        } else if matches!(config.led_type, rog_aura::AuraDeviceType::LaptopKeyboardTuf)
+        if matches!(config.led_type, rog_aura::AuraDeviceType::LaptopKeyboardTuf)
             && let Some(tuf) = &self.backlight
         {
             for row in effect.iter() {
@@ -365,20 +299,6 @@ impl Aura {
     }
 
     pub async fn fix_ally_power(&mut self) -> Result<(), RogError> {
-        if self.config.lock().await.led_type == AuraDeviceType::Ally
-            && let Some(hid_raw) = &self.hid
-        {
-            let mut config = self.config.lock().await;
-            if config.ally_fix.is_none() {
-                let msg = [
-                    0x5d, 0xbd, 0x01, 0xff, 0xff, 0xff, 0xff,
-                ];
-                hid_raw.lock().await.write_bytes(&msg)?;
-                info!("Reset Ally power settings to base");
-                config.ally_fix = Some(true);
-            }
-            config.write();
-        }
         Ok(())
     }
 }
