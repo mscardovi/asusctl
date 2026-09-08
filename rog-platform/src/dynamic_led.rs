@@ -50,10 +50,13 @@ impl DynamicLed {
         })? {
             let sysname = device.sysname().to_string_lossy();
             if sysname == name {
-                info!("Found Dynamic Lighting LED device at {:?}", sysname);
-                return Ok(Self {
-                    path: device.syspath().to_path_buf(),
-                });
+                let syspath = device.syspath();
+                if name.starts_with("aura:") || syspath.join("effect_index").exists() {
+                    info!("Found Dynamic Lighting LED device at {:?}", sysname);
+                    return Ok(Self {
+                        path: syspath.to_path_buf(),
+                    });
+                }
             }
         }
 
@@ -65,6 +68,14 @@ impl DynamicLed {
     /// Helper to find a dynamic LED by name.
     pub fn find(name: &str) -> Result<Self> {
         Self::new(name)
+    }
+
+    /// Return the LED name (e.g. "aura:keyboard" or "asus::kbd_backlight").
+    pub fn name(&self) -> &str {
+        self.path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
     }
 
     /// Check if a dynamic LED is present on the system.
