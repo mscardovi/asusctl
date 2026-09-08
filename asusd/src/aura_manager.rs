@@ -4,7 +4,7 @@
 // - Add it to Zbus server
 // - If udev sees device removed then remove the zbus path
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dmi_id::DMIID;
@@ -12,7 +12,7 @@ use log::{debug, error, info, warn};
 use mio::{Events, Interest, Poll, Token};
 use rog_aura::AuraDeviceType;
 use rog_platform::error::PlatformError;
-use rog_platform::hid_raw::HidRaw;
+use rog_slash::SlashType;
 use tokio::sync::Mutex;
 use udev::{Device, MonitorBuilder};
 use zbus::Connection;
@@ -98,7 +98,6 @@ pub struct AsusDevice {
 
 pub struct DeviceManager {
     _dbus_connection: Connection,
-    _hid_handles: Arc<Mutex<HashMap<String, Arc<Mutex<HidRaw>>>>>,
 }
 
 /// Returns true if this hidraw device is a non-Aura interface on the
@@ -133,30 +132,9 @@ fn is_non_aura_1ce6_interface(device: &Device) -> bool {
 }
 
 impl DeviceManager {
-    #[allow(clippy::type_complexity)]
-    async fn get_or_create_hid_handle(
-        handles: &Arc<Mutex<HashMap<String, Arc<Mutex<HidRaw>>>>>,
-        endpoint: &Device,
-    ) -> Result<(Arc<Mutex<HidRaw>>, String), RogError> {
-        let dev_node = endpoint
-            .devnode()
-            .ok_or_else(|| RogError::MissingFunction("hidraw devnode missing".to_string()))?;
-        let key = dev_node.to_string_lossy().to_string();
-
-        if let Some(existing) = handles.lock().await.get(&key).cloned() {
-            return Ok((existing, key));
-        }
-
-        let hidraw = HidRaw::from_device(endpoint.clone())?;
-        let handle = Arc::new(Mutex::new(hidraw));
-        handles.lock().await.insert(key.clone(), handle.clone());
-        Ok((handle, key))
-    }
-
     async fn init_hid_devices(
         connection: &Connection,
         device: Device,
-        handles: Arc<Mutex<HashMap<String, Arc<Mutex<HidRaw>>>>>,
     ) -> Result<Vec<AsusDevice>, RogError> {
         let mut devices = Vec::new();
         if let Some(usb_device) = device.parent_with_subsystem_devtype("usb", "usb_device")?
@@ -204,12 +182,16 @@ impl DeviceManager {
                 return Ok(devices);
             }
 
-            // For other devices that still require a shared hid handle (e.g. Slash):
-            // Use the top-level endpoint, not the parent
-            if let Ok((dev, hid_key)) = Self::get_or_create_hid_handle(&handles, &device).await {
-                debug!("Testing device {usb_id:?}");
-                // SLASH DEVICE
-                if let Ok(dev_type) = DeviceHandle::new_slash_hid(dev.clone(), usb_id_str).await
+            // Check for Slash device via sysfs SlashLed / USB
+            let slash_type = SlashType::from_dmi();
+            if !matches!(slash_type, SlashType::Unsupported)
+                && slash_type
+                    .prod_id_str()
+                    .to_lowercase()
+                    .trim_start_matches("0x")
+                    == usb_id_str
+            {
+                if let Ok(dev_type) = DeviceHandle::maybe_slash().await
                     && let DeviceHandle::Slash(slash) = dev_type.clone()
                 {
                     let path = dbus_path_for_dev(&usb_device).unwrap_or(dbus_path_for_slash());
@@ -225,22 +207,18 @@ impl DeviceManager {
                         devices.push(AsusDevice {
                             device: dev_type,
                             dbus_path: path,
-                            hid_key: Some(hid_key),
+                            hid_key: None,
                         });
                     }
                 }
-            } else {
-                warn!("Failed to initialise shared hid handle for {usb_id:?}");
+                return Ok(devices);
             }
         }
         Ok(devices)
     }
 
     /// To be called on daemon startup
-    async fn init_all_hid(
-        connection: &Connection,
-        handles: Arc<Mutex<HashMap<String, Arc<Mutex<HidRaw>>>>>,
-    ) -> Result<Vec<AsusDevice>, RogError> {
+    async fn init_all_hid(connection: &Connection) -> Result<Vec<AsusDevice>, RogError> {
         // Ensure we only process one hidraw interface per physical USB device.
         // A USB device can expose multiple HID interfaces (and thus multiple hidraw nodes).
         // Processing more than one causes duplicate device initialisation which can
@@ -277,7 +255,7 @@ impl DeviceManager {
                 }
             }
 
-            devices.append(&mut Self::init_hid_devices(connection, device, handles.clone()).await?);
+            devices.append(&mut Self::init_hid_devices(connection, device).await?);
         }
 
         Ok(devices)
@@ -417,13 +395,10 @@ impl DeviceManager {
         Ok(devices)
     }
 
-    pub async fn find_all_devices(
-        connection: &Connection,
-        handles: Arc<Mutex<HashMap<String, Arc<Mutex<HidRaw>>>>>,
-    ) -> Vec<AsusDevice> {
+    pub async fn find_all_devices(connection: &Connection) -> Vec<AsusDevice> {
         let mut devices: Vec<AsusDevice> = Vec::new();
         // HID first, always
-        if let Ok(devs) = &mut Self::init_all_hid(connection, handles.clone()).await {
+        if let Ok(devs) = &mut Self::init_all_hid(connection).await {
             devices.append(devs);
         }
         // USB after, need to check if HID picked something up and if so, skip it
@@ -443,7 +418,7 @@ impl DeviceManager {
         }
 
         if do_slash {
-            if let Ok(dev_type) = DeviceHandle::new_slash_usb().await {
+            if let Ok(dev_type) = DeviceHandle::maybe_slash().await {
                 if let DeviceHandle::Slash(slash) = dev_type.clone() {
                     let path = dbus_path_for_slash();
                     let ctrl = SlashZbus::new(slash);
@@ -534,19 +509,16 @@ impl DeviceManager {
 
     pub async fn new(connection: Connection) -> Result<Self, RogError> {
         let conn_copy = connection.clone();
-        let hid_handles = Arc::new(Mutex::new(HashMap::new()));
-        let devices = Self::find_all_devices(&conn_copy, hid_handles.clone()).await;
+        let devices = Self::find_all_devices(&conn_copy).await;
         info!("Found {} valid devices on startup", devices.len());
         let devices = Arc::new(Mutex::new(devices));
         let manager = Self {
             _dbus_connection: connection,
-            _hid_handles: hid_handles.clone(),
         };
 
         // TODO: The /sysfs/ LEDs don't cause events, so they need to be manually
         // checked for and added
 
-        let hid_handles_thread = hid_handles.clone();
         std::thread::spawn(move || {
             let mut monitor = MonitorBuilder::new()?.listen()?;
             let mut poll = Poll::new()?;
@@ -575,7 +547,6 @@ impl DeviceManager {
 
                     let devices = devices.clone();
                     let conn_copy = conn_copy.clone();
-                    let hid_handles = hid_handles_thread.clone();
                     rt.block_on(async move {
                         // SCSCI devs
                         if subsys == "block" {
@@ -693,11 +664,6 @@ impl DeviceManager {
                                         };
                                         info!("AuraManager removed: {path:?}, {res}");
                                     }
-                                    // Always drop the shared handle for this node, even if no
-                                    // AsusDevice referenced it, so the fd (and minor) is freed.
-                                    if hid_handles.lock().await.remove(&removed_node).is_some() {
-                                        info!("Dropped hid handle for {removed_node}");
-                                    }
                                 }
                             } else if action == "add"
                                 && let Some(parent) =
@@ -720,10 +686,9 @@ impl DeviceManager {
                                 if is_non_aura_1ce6_interface(&evdev) {
                                     return Ok(());
                                 }
-                                if let Ok(mut new_devs) =
-                                    Self::init_hid_devices(&conn_copy, evdev, hid_handles.clone())
-                                        .await
-                                        .map_err(|e| error!("Couldn't add new device: {e:?}"))
+                                if let Ok(mut new_devs) = Self::init_hid_devices(&conn_copy, evdev)
+                                    .await
+                                    .map_err(|e| error!("Couldn't add new device: {e:?}"))
                                 {
                                     devices.lock().await.append(&mut new_devs);
                                 }

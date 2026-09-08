@@ -58,25 +58,33 @@ impl SlashZbus {
         } else {
             config.brightness
         };
-        self.0
-            .write_bytes(&slash_pkt_enable(config.slash_type, enabled))
-            .await
-            .map_err(|err| {
-                warn!("ctrl_slash::enable {}", err);
-            })
-            .ok();
-        self.0
-            .write_bytes(&slash_pkt_options(
-                config.slash_type,
-                enabled,
-                brightness,
-                config.display_interval,
-            ))
-            .await
-            .map_err(|err| {
-                warn!("ctrl_slash::set_options {}", err);
-            })
-            .ok();
+
+        if let Some(led) = self.0.led() {
+            let b = if enabled { brightness } else { 0 };
+            if let Err(err) = led.set_brightness(b) {
+                warn!("ctrl_slash::set_enabled via sysfs: {err}");
+            }
+        } else {
+            self.0
+                .write_bytes(&slash_pkt_enable(config.slash_type, enabled))
+                .await
+                .map_err(|err| {
+                    warn!("ctrl_slash::enable {}", err);
+                })
+                .ok();
+            self.0
+                .write_bytes(&slash_pkt_options(
+                    config.slash_type,
+                    enabled,
+                    brightness,
+                    config.display_interval,
+                ))
+                .await
+                .map_err(|err| {
+                    warn!("ctrl_slash::set_options {}", err);
+                })
+                .ok();
+        }
 
         config.enabled = enabled;
         config.brightness = brightness;
@@ -95,18 +103,25 @@ impl SlashZbus {
     async fn set_brightness(&self, brightness: u8) {
         let mut config = self.0.lock_config().await;
         let enabled = brightness > 0;
-        self.0
-            .write_bytes(&slash_pkt_options(
-                config.slash_type,
-                enabled,
-                brightness,
-                config.display_interval,
-            ))
-            .await
-            .map_err(|err| {
-                warn!("ctrl_slash::set_options {}", err);
-            })
-            .ok();
+
+        if let Some(led) = self.0.led() {
+            if let Err(err) = led.set_brightness(brightness) {
+                warn!("ctrl_slash::set_brightness via sysfs: {err}");
+            }
+        } else {
+            self.0
+                .write_bytes(&slash_pkt_options(
+                    config.slash_type,
+                    enabled,
+                    brightness,
+                    config.display_interval,
+                ))
+                .await
+                .map_err(|err| {
+                    warn!("ctrl_slash::set_options {}", err);
+                })
+                .ok();
+        }
 
         config.enabled = enabled;
         config.brightness = brightness;
@@ -123,15 +138,22 @@ impl SlashZbus {
     #[zbus(property)]
     async fn set_interval(&self, interval: u8) {
         let mut config = self.0.lock_config().await;
-        self.0
-            .write_bytes(&slash_pkt_options(
-                config.slash_type, config.enabled, config.brightness, interval,
-            ))
-            .await
-            .map_err(|err| {
-                warn!("ctrl_slash::set_options {}", err);
-            })
-            .ok();
+
+        if let Some(led) = self.0.led() {
+            if let Err(err) = led.set_slash_interval(interval) {
+                warn!("ctrl_slash::set_interval via sysfs: {err}");
+            }
+        } else {
+            self.0
+                .write_bytes(&slash_pkt_options(
+                    config.slash_type, config.enabled, config.brightness, interval,
+                ))
+                .await
+                .map_err(|err| {
+                    warn!("ctrl_slash::set_options {}", err);
+                })
+                .ok();
+        }
 
         config.display_interval = interval;
         config.write();
@@ -151,12 +173,18 @@ impl SlashZbus {
         })?;
         let mut config = self.0.lock_config().await;
 
-        let command_packets = slash_pkt_set_mode(config.slash_type, mode);
-        // self.node.write_bytes(&command_packets[0])?;
-        self.0.write_bytes(&command_packets[1]).await?;
-        self.0
-            .write_bytes(&slash_pkt_save(config.slash_type))
-            .await?;
+        if let Some(led) = self.0.led() {
+            led.set_slash_mode(&mode.to_string()).map_err(|err| {
+                zbus::fdo::Error::Failed(format!("ctrl_slash::set_mode sysfs: {err}"))
+            })?;
+        } else {
+            let command_packets = slash_pkt_set_mode(config.slash_type, mode);
+            // self.node.write_bytes(&command_packets[0])?;
+            self.0.write_bytes(&command_packets[1]).await?;
+            self.0
+                .write_bytes(&slash_pkt_save(config.slash_type))
+                .await?;
+        }
 
         config.display_mode = mode;
         config.write();
@@ -280,6 +308,15 @@ impl Reloadable for SlashZbus {
     async fn reload(&mut self) -> Result<(), RogError> {
         debug!("reloading slash settings");
         let config = self.0.lock_config().await;
+
+        if let Some(led) = self.0.led() {
+            let brightness = if config.enabled { config.brightness } else { 0 };
+            led.set_brightness(brightness)?;
+            led.set_slash_interval(config.display_interval)?;
+            led.set_slash_mode(&config.display_mode.to_string())?;
+            return Ok(());
+        }
+
         self.0
             .write_bytes(&slash_pkt_options(
                 config.slash_type,

@@ -7,7 +7,7 @@ use rog_anime::error::AnimeError;
 use rog_anime::usb::get_anime_type;
 use rog_aura::AuraDeviceType;
 use rog_platform::DynamicLed;
-use rog_platform::hid_raw::HidRaw;
+use rog_platform::SlashLed;
 use rog_platform::keyboard_led::KeyboardBacklight;
 use rog_platform::usb_raw::USBRaw;
 use rog_scsi::{ScsiType, open_device};
@@ -28,7 +28,6 @@ use crate::error::RogError;
 pub enum _DeviceHandle {
     /// The AniMe devices require USBRaw as they are not HID devices
     Usb(USBRaw),
-    HidRaw(HidRaw),
     LedClass(KeyboardBacklight),
     /// TODO
     MulticolourLed,
@@ -48,30 +47,26 @@ pub enum DeviceHandle {
 }
 
 impl DeviceHandle {
-    /// Try Slash HID. If one exists it is initialised and returned.
-    pub async fn new_slash_hid(
-        device: Arc<Mutex<HidRaw>>,
-        prod_id: &str,
-    ) -> Result<Self, RogError> {
-        debug!("Testing for HIDRAW Slash");
+    /// Try Slash sysfs LED or USB. If one exists it is initialised and returned.
+    pub async fn maybe_slash() -> Result<Self, RogError> {
+        debug!("Testing for Slash");
         let slash_type = SlashType::from_dmi();
-        if matches!(slash_type, SlashType::Unsupported)
-            || slash_type
-                .prod_id_str()
-                .to_lowercase()
-                .trim_start_matches("0x")
-                != prod_id
-        {
-            log::info!("Unknown or invalid slash: {prod_id:?}, skipping");
-            return Err(RogError::NotFound("No slash device".to_string()));
+        if matches!(slash_type, SlashType::Unsupported) {
+            return Err(RogError::Slash(SlashError::NoDevice));
         }
-        info!("Found slash type {slash_type:?}: {prod_id}");
 
-        let mut config = SlashConfig::new().load();
-        config.slash_type = slash_type;
-        let slash = Slash::new(Some(device), None, Arc::new(Mutex::new(config)));
-        slash.do_initialization().await?;
-        Ok(Self::Slash(slash))
+        // Try sysfs SlashLed first (kernel driver hid-asus)
+        if let Ok(led) = SlashLed::new() {
+            info!("Found Slash sysfs LED at {:?}", led.path());
+            let mut config = SlashConfig::new().load();
+            config.slash_type = slash_type;
+            let slash = Slash::new(Some(led), None, Arc::new(Mutex::new(config)));
+            slash.do_initialization().await?;
+            return Ok(Self::Slash(slash));
+        }
+
+        // Fallback to raw USB if kernel LED classdev is not present
+        Self::new_slash_usb().await
     }
 
     /// Try Slash USB. If one exists it is initialised and returned.
