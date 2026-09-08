@@ -294,8 +294,45 @@ impl Aura {
                     0, 0, r, g, b, 0,
                 ])?;
             }
+            return Ok(());
         }
-        Ok(())
+
+        let dynamic_led = self.dynamic_kbd.as_ref().or(self.dynamic_global.as_ref());
+        if let Some(dynamic) = dynamic_led {
+            let dynamic = dynamic.lock().await;
+            let led_count = dynamic.get_led_count().unwrap_or(168) as usize;
+            let expected_len = led_count * 3;
+            let mut rgb_buf = Vec::with_capacity(expected_len);
+
+            if effect.len() == 1 && led_count == 4 {
+                // Zoned keyboard (4 zones: left, left-mid, right-mid, right)
+                if let Some(row) = effect.first()
+                    && let Some(payload) = row.get(9..21)
+                {
+                    rgb_buf.extend_from_slice(payload);
+                }
+            } else {
+                // Per-key keyboard
+                for row in effect.iter() {
+                    if row.len() >= 9 {
+                        let num_leds = row.get(7).copied().unwrap_or(16) as usize;
+                        let payload_len = num_leds * 3;
+                        if let Some(payload) = row.get(9..9 + payload_len) {
+                            rgb_buf.extend_from_slice(payload);
+                        }
+                    }
+                }
+            }
+
+            if !rgb_buf.is_empty() {
+                rgb_buf.resize(expected_len, 0);
+                dynamic.write_direct(&rgb_buf)?;
+                config.per_key_mode_active = true;
+            }
+            return Ok(());
+        }
+
+        Err(RogError::NoAuraKeyboard)
     }
 
     pub async fn fix_ally_power(&mut self) -> Result<(), RogError> {
