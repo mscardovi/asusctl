@@ -112,21 +112,6 @@ impl DeviceHandle {
         Err(RogError::NotFound(
             "Can't use anime over hidraw yet. Skip.".to_string(),
         ))
-
-        // debug!("Testing for HIDRAW AniMe");
-        // let anime_type = AnimeType::from_dmi();
-        // dbg!(prod_id);
-        // if matches!(anime_type, AnimeType::Unsupported) || prod_id != "193b"
-        // {     log::info!("Unknown or invalid AniMe: {prod_id:?},
-        // skipping");     return Err(RogError::NotFound("No
-        // anime-matrix device".to_string())); }
-        // info!("Found AniMe Matrix HIDRAW {anime_type:?}: {prod_id}");
-
-        // let mut config = AniMeConfig::new().load();
-        // config.anime_type = anime_type;
-        // let mut anime = AniMe::new(Some(device), None,
-        // Arc::new(Mutex::new(config))); anime.do_initialization().
-        // await?; Ok(Self::AniMe(anime))
     }
 
     pub async fn maybe_anime_usb() -> Result<Self, RogError> {
