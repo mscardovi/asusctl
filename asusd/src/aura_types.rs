@@ -42,17 +42,13 @@ pub enum DeviceHandle {
     /// The AniMe devices require USBRaw as they are not HID devices
     AniMe(AniMe),
     Scsi(ScsiAura),
-    Ally(Arc<Mutex<HidRaw>>),
-    OldAura(Arc<Mutex<HidRaw>>),
-    /// TUF laptops have an aditional set of attributes added to the LED /sysfs/
-    TufLedClass(Arc<Mutex<HidRaw>>),
     /// TODO
     MulticolourLed,
     None,
 }
 
 impl DeviceHandle {
-    /// Try Slash HID. If one exists it is initialsed and returned.
+    /// Try Slash HID. If one exists it is initialised and returned.
     pub async fn new_slash_hid(
         device: Arc<Mutex<HidRaw>>,
         prod_id: &str,
@@ -78,7 +74,7 @@ impl DeviceHandle {
         Ok(Self::Slash(slash))
     }
 
-    /// Try Slash USB. If one exists it is initialsed and returned.
+    /// Try Slash USB. If one exists it is initialised and returned.
     pub async fn new_slash_usb() -> Result<Self, RogError> {
         debug!("Testing for USB Slash");
         let slash_type = SlashType::from_dmi();
@@ -103,17 +99,6 @@ impl DeviceHandle {
         }
     }
 
-    /// Try AniMe Matrix HID. If one exists it is initialsed and returned.
-    pub async fn maybe_anime_hid(
-        _device: Arc<Mutex<HidRaw>>,
-        _prod_id: &str,
-    ) -> Result<Self, RogError> {
-        // TODO: can't use HIDRAW for anime at the moment
-        Err(RogError::NotFound(
-            "Can't use anime over hidraw yet. Skip.".to_string(),
-        ))
-    }
-
     pub async fn maybe_anime_usb() -> Result<Self, RogError> {
         debug!("Testing for USB AniMe");
         let anime_type = get_anime_type();
@@ -128,7 +113,6 @@ impl DeviceHandle {
             let mut config = AniMeConfig::new().load();
             config.anime_type = anime_type;
             let mut anime = AniMe::new(
-                None,
                 Some(Arc::new(Mutex::new(usb))),
                 Arc::new(Mutex::new(config)),
             );
