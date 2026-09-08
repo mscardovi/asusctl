@@ -6,6 +6,7 @@ use rog_anime::AnimeType;
 use rog_anime::error::AnimeError;
 use rog_anime::usb::get_anime_type;
 use rog_aura::AuraDeviceType;
+use rog_platform::DynamicLed;
 use rog_platform::hid_raw::HidRaw;
 use rog_platform::keyboard_led::KeyboardBacklight;
 use rog_platform::usb_raw::USBRaw;
@@ -197,10 +198,41 @@ impl DeviceHandle {
                 Some(Arc::new(Mutex::new(k)))
             });
 
+        // Check for Dynamic Lighting interface
+        let (dynamic_global, dynamic_kbd, dynamic_lightbar) = {
+            let global = DynamicLed::find("aura:global")
+                .map(|g| {
+                    info!("Dynamic Lighting global aggregate detected: aura:global");
+                    Arc::new(Mutex::new(g))
+                })
+                .ok();
+            let kbd = DynamicLed::find("aura:keyboard")
+                .map(|k| {
+                    info!("Dynamic Lighting keyboard detected: aura:keyboard");
+                    Arc::new(Mutex::new(k))
+                })
+                .ok();
+            let lb = DynamicLed::find("aura:lightbar")
+                .map(|l| {
+                    info!("Dynamic Lighting lightbar detected: aura:lightbar");
+                    Arc::new(Mutex::new(l))
+                })
+                .ok();
+            if global.is_some() || kbd.is_some() || lb.is_some() {
+                (global, kbd, lb)
+            } else {
+                debug!("Dynamic Lighting not detected; using legacy hidraw fallback");
+                (None, None, None)
+            }
+        };
+
         // Load saved mode, colours, brightness, power from disk; apply on reload
         let mut config = AuraConfig::load_and_update_config(prod_id);
         config.led_type = aura_type;
         let aura = Aura {
+            dynamic_global,
+            dynamic_kbd,
+            dynamic_lightbar,
             hid: device,
             backlight,
             config: Arc::new(Mutex::new(config)),

@@ -97,13 +97,62 @@ impl AuraZbus {
     #[zbus(property)]
     async fn supported_basic_modes(&self) -> Result<Vec<AuraModeNum>, ZbErr> {
         let config = self.0.config.lock().await;
+        if self.0.has_dynamic_lighting() {
+            let led_lock = if let Some(global) = &self.0.dynamic_global {
+                Some(global.lock().await)
+            } else if let Some(kbd) = &self.0.dynamic_kbd {
+                Some(kbd.lock().await)
+            } else {
+                None
+            };
+            if let Some(led) = led_lock {
+                let mut modes = Vec::new();
+                for mode in config.builtins.keys() {
+                    if let Some(eff_str) = mode.to_dynamic_effect_str()
+                        && led.is_effect_supported(eff_str)
+                    {
+                        modes.push(*mode);
+                    }
+                }
+                return Ok(modes);
+            }
+        }
         Ok(config.builtins.keys().cloned().collect())
     }
 
     #[zbus(property)]
     async fn supported_basic_zones(&self) -> Result<Vec<AuraZone>, ZbErr> {
         let config = self.0.config.lock().await;
-        Ok(config.support_data.basic_zones.clone())
+        if self.0.has_dynamic_lighting() {
+            // If the kernel exposes only aura:global (unified chassis), there are
+            // no independent basic zones; the entire lighting is driven as a single unit.
+            if self.0.dynamic_kbd.is_none() && self.0.dynamic_lightbar.is_none() {
+                return Ok(vec![]);
+            }
+            let mut zones = config.support_data.basic_zones.clone();
+            if self.0.dynamic_lightbar.is_none() {
+                zones.retain(|z| !matches!(z, AuraZone::BarLeft | AuraZone::BarRight));
+            } else {
+                if !zones.contains(&AuraZone::BarLeft) {
+                    zones.push(AuraZone::BarLeft);
+                }
+                if !zones.contains(&AuraZone::BarRight) {
+                    zones.push(AuraZone::BarRight);
+                }
+            }
+            Ok(zones)
+        } else {
+            let mut zones = config.support_data.basic_zones.clone();
+            if self.0.dynamic_lightbar.is_some() {
+                if !zones.contains(&AuraZone::BarLeft) {
+                    zones.push(AuraZone::BarLeft);
+                }
+                if !zones.contains(&AuraZone::BarRight) {
+                    zones.push(AuraZone::BarRight);
+                }
+            }
+            Ok(zones)
+        }
     }
 
     #[zbus(property)]
@@ -166,10 +215,39 @@ impl AuraZbus {
     #[zbus(property)]
     async fn set_led_mode_data(&mut self, effect: AuraEffect) -> Result<(), ZbErr> {
         let mut config = self.0.config.lock().await;
-        if !config.support_data.basic_modes.contains(&effect.mode)
-            || effect.zone != AuraZone::None
-                && !config.support_data.basic_zones.contains(&effect.zone)
-        {
+        let (is_mode_supported, is_zone_supported) = if self.0.has_dynamic_lighting() {
+            let mode_ok = if let Some(eff_str) = effect.mode.to_dynamic_effect_str() {
+                let led_lock = if let Some(global) = &self.0.dynamic_global {
+                    Some(global.lock().await)
+                } else if let Some(kbd) = &self.0.dynamic_kbd {
+                    Some(kbd.lock().await)
+                } else {
+                    None
+                };
+                led_lock.is_some_and(|l| l.is_effect_supported(eff_str))
+            } else {
+                false
+            };
+            let zone_ok = match effect.zone {
+                AuraZone::None => true,
+                AuraZone::BarLeft | AuraZone::BarRight => self.0.dynamic_lightbar.is_some(),
+                _ => {
+                    self.0.dynamic_kbd.is_some()
+                        && config.support_data.basic_zones.contains(&effect.zone)
+                }
+            };
+            (mode_ok, zone_ok)
+        } else {
+            (
+                config.support_data.basic_modes.contains(&effect.mode),
+                effect.zone == AuraZone::None
+                    || config.support_data.basic_zones.contains(&effect.zone)
+                    || (self.0.dynamic_lightbar.is_some()
+                        && matches!(effect.zone, AuraZone::BarLeft | AuraZone::BarRight)),
+            )
+        };
+
+        if !is_mode_supported || !is_zone_supported {
             return Err(ZbErr::NotSupported(format!(
                 "The Aura effect is not supported: {effect:?}"
             )));

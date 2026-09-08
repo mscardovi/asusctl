@@ -3,9 +3,11 @@ use std::sync::Arc;
 use config::AuraConfig;
 use config_traits::StdConfig;
 use log::info;
+use log::{debug, warn};
 use rog_aura::keyboard::{AuraLaptopUsbPackets, LedUsbPackets};
 use rog_aura::usb::{AURA_LAPTOP_LED_APPLY, AURA_LAPTOP_LED_SET};
 use rog_aura::{AURA_LAPTOP_LED_MSG_LEN, AuraDeviceType, AuraEffect, LedBrightness, PowerZones};
+use rog_platform::DynamicLed;
 use rog_platform::hid_raw::HidRaw;
 use rog_platform::keyboard_led::KeyboardBacklight;
 use tokio::sync::{Mutex, MutexGuard};
@@ -17,12 +19,20 @@ pub mod trait_impls;
 
 #[derive(Debug, Clone)]
 pub struct Aura {
+    pub dynamic_global: Option<Arc<Mutex<DynamicLed>>>,
+    pub dynamic_kbd: Option<Arc<Mutex<DynamicLed>>>,
+    pub dynamic_lightbar: Option<Arc<Mutex<DynamicLed>>>,
     pub hid: Option<Arc<Mutex<HidRaw>>>,
     pub backlight: Option<Arc<Mutex<KeyboardBacklight>>>,
     pub config: Arc<Mutex<AuraConfig>>,
 }
 
 impl Aura {
+    #[must_use]
+    pub fn has_dynamic_lighting(&self) -> bool {
+        self.dynamic_kbd.is_some() || self.dynamic_global.is_some()
+    }
+
     /// Initialise the device if required.
     pub async fn do_initialization(&self) -> Result<(), RogError> {
         Ok(())
@@ -36,7 +46,11 @@ impl Aura {
     /// this in scope then a deadlock can occur.
     pub async fn update_config(&self) -> Result<(), RogError> {
         let mut config = self.config.lock().await;
-        let bright = if let Some(bl) = self.backlight.as_ref() {
+        let bright = if let Some(dynamic) = self.dynamic_global.as_ref() {
+            dynamic.lock().await.get_brightness().unwrap_or_default()
+        } else if let Some(dynamic) = self.dynamic_kbd.as_ref() {
+            dynamic.lock().await.get_brightness().unwrap_or_default()
+        } else if let Some(bl) = self.backlight.as_ref() {
             bl.lock().await.get_brightness().unwrap_or_default()
         } else {
             config.brightness.into()
@@ -93,6 +107,90 @@ impl Aura {
         dev_type: AuraDeviceType,
         mode: &AuraEffect,
     ) -> Result<(), RogError> {
+        // Priority: Dynamic Lighting sysfs interface
+        if self.has_dynamic_lighting()
+            && let Some(eff_str) = mode.mode.to_dynamic_effect_str()
+        {
+            let speed = mode.speed.to_dynamic_speed();
+            let dir_str = mode.direction.to_dynamic_direction_str();
+            let palette = mode.to_dynamic_palette();
+
+            let apply_to_led = |led: &DynamicLed| -> bool {
+                if led.is_effect_supported(eff_str) {
+                    let _ = led.set_speed(speed);
+                    let _ = led.set_direction(dir_str);
+                    let _ = led.set_palette_colors(&palette);
+                    if let Err(e) = led.set_effect(eff_str) {
+                        warn!("Failed to set dynamic lighting effect '{eff_str}': {e}");
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    debug!(
+                        "Dynamic lighting effect '{eff_str}' not supported by kernel, trying fallback"
+                    );
+                    false
+                }
+            };
+
+            match mode.zone {
+                rog_aura::AuraZone::BarLeft | rog_aura::AuraZone::BarRight => {
+                    if let Some(lb) = &self.dynamic_lightbar {
+                        let led = lb.lock().await;
+                        if apply_to_led(&led) {
+                            return Ok(());
+                        }
+                    } else {
+                        debug!(
+                            "Skipping unsupported lightbar zone in dynamic lighting unified mode"
+                        );
+                        return Ok(());
+                    }
+                }
+                rog_aura::AuraZone::None => {
+                    if let Some(global) = &self.dynamic_global {
+                        let global_led = global.lock().await;
+                        if apply_to_led(&global_led) {
+                            return Ok(());
+                        }
+                    }
+                    if let Some(kbd) = &self.dynamic_kbd {
+                        let kbd_led = kbd.lock().await;
+                        let kbd_ok = apply_to_led(&kbd_led);
+                        if let Some(lb) = &self.dynamic_lightbar {
+                            let lb_led = lb.lock().await;
+                            let _ = apply_to_led(&lb_led);
+                        }
+                        if kbd_ok {
+                            return Ok(());
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(kbd) = &self.dynamic_kbd {
+                        let kbd_led = kbd.lock().await;
+                        if apply_to_led(&kbd_led) {
+                            return Ok(());
+                        }
+                    } else if let Some(global) = &self.dynamic_global {
+                        let global_led = global.lock().await;
+                        if apply_to_led(&global_led) {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        // When Dynamic Lighting is active, do not fall back to raw hidraw or TUF platform
+        if self.has_dynamic_lighting() {
+            return Err(RogError::MissingFunction(
+                "Dynamic lighting mode or zone not supported by kernel".to_string(),
+            ));
+        }
+
+        // Fallback: TUF platform or legacy hidraw
         if matches!(dev_type, AuraDeviceType::LaptopKeyboardTuf) {
             if let Some(platform) = &self.backlight {
                 let buf = [
@@ -128,6 +226,24 @@ impl Aura {
     }
 
     pub async fn set_brightness(&self, value: u8) -> Result<(), RogError> {
+        let mut updated = false;
+        if let Some(dynamic_global) = &self.dynamic_global
+            && dynamic_global.lock().await.set_brightness(value).is_ok()
+        {
+            updated = true;
+        }
+        if let Some(dynamic_kbd) = &self.dynamic_kbd
+            && dynamic_kbd.lock().await.set_brightness(value).is_ok()
+        {
+            updated = true;
+        }
+        if let Some(dynamic_lb) = &self.dynamic_lightbar {
+            let _ = dynamic_lb.lock().await.set_brightness(value);
+        }
+        if updated {
+            return Ok(());
+        }
+
         if let Some(backlight) = &self.backlight {
             backlight.lock().await.set_brightness(value)?;
             return Ok(());
@@ -140,6 +256,33 @@ impl Aura {
     /// Set combination state for boot animation/sleep animation/all leds/keys
     /// leds/side leds LED active
     pub async fn set_power_states(&self, config: &AuraConfig) -> Result<(), RogError> {
+        if let Some(dynamic_led) = self.dynamic_global.as_ref().or(self.dynamic_kbd.as_ref()) {
+            let kbd = dynamic_led.lock().await;
+            if kbd.has_power_states() {
+                let mut states = Vec::new();
+                for state in &config.enabled.states {
+                    if state.boot {
+                        states.push("boot");
+                    }
+                    if state.awake {
+                        states.push("awake");
+                    }
+                    if state.sleep {
+                        states.push("sleep");
+                    }
+                    if state.shutdown {
+                        states.push("shutdown");
+                    }
+                }
+                let states_str = states.join(" ");
+                if let Err(e) = kbd.set_power_states(&states_str) {
+                    warn!("Failed to set power states via dynamic lighting: {e}");
+                } else {
+                    return Ok(());
+                }
+            }
+        }
+
         if matches!(config.led_type, rog_aura::AuraDeviceType::LaptopKeyboardTuf) {
             if let Some(backlight) = &self.backlight {
                 // TODO: tuf bool array
