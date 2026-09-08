@@ -5,6 +5,7 @@ pub mod asus_armoury;
 pub mod backlight;
 pub mod cled;
 pub mod cpu;
+pub mod dynamic_led;
 pub mod error;
 pub mod gpu_pci;
 pub mod hid_raw;
@@ -16,6 +17,7 @@ pub mod usb_raw;
 
 use std::path::Path;
 
+pub use dynamic_led::DynamicLed;
 use error::{PlatformError, Result};
 use log::warn;
 use platform::PlatformProfile;
